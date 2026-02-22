@@ -1,267 +1,389 @@
 import { useEffect, useRef, useState } from 'react';
-
 import Map from 'ol/Map';
-
 import View from 'ol/View';
-
 import TileLayer from 'ol/layer/Tile';
-
 import TileWMS from 'ol/source/TileWMS';
-
 import { useGeographic } from 'ol/proj';
-
 import OSM from 'ol/source/OSM';
-
-import { Layers, Droplets, Home, Waypoints, Train, Bus, Flame, ChevronRight, ChevronLeft, ChevronDown, Info } from 'lucide-react';
-
+import VectorLayer from 'ol/layer/Vector';
+import VectorSource from 'ol/source/Vector';
+import Draw from 'ol/interaction/Draw';
+import Overlay from 'ol/Overlay';
+import { getArea, getLength } from 'ol/sphere';
+import { unByKey } from 'ol/Observable';
+import { LineString, Polygon } from 'ol/geom';
+import { Style, Fill, Stroke, Circle as CircleStyle } from 'ol/style';
+import { MousePointer2 as CursorIcon, Ruler as RulerIcon, Square as SquareIcon } from 'lucide-react';
 import 'ol/ol.css';
 
+export const geoServerUrl = "http://localhost:8081/geoserver/wms";
 
-
-const geoServerUrl = "http://localhost:8081/geoserver/wms";
-
-
-
-interface LayerVisibility {
-
-  water: boolean; building: boolean; building_summary: boolean;
-
-  roads: boolean; rail: boolean; bus: boolean; fire: boolean;
-
+export interface LayerVisibility {
+  water: boolean;
+  building: boolean;
+  building_summary: boolean;
+  roads: boolean;
+  rail: boolean;
+  bus: boolean;
+  fire: boolean;
 }
 
-
-
-const layerMapping: Record<keyof LayerVisibility, string> = {
-
+export const layerMapping: Record<keyof LayerVisibility, string> = {
   water: 'aryandesai_project:water_bodies_polygon',
-
   building: 'aryandesai_project:building',
-
   building_summary: 'aryandesai_project:building_summary',
-
   roads: 'aryandesai_project:road_line',
-
   rail: 'aryandesai_project:rail_line',
-
   bus: 'aryandesai_project:bus_stop',
-
   fire: 'aryandesai_project:fire_station_point',
-
 };
 
+export type ActiveTool = 'cursor' | 'distance' | 'area';
 
+interface MapViewProps {
+  visibleLayers: LayerVisibility;
+  activeTool?: ActiveTool;
+  onToolChange?: (tool: ActiveTool) => void;
+  isMaximized?: boolean;
+}
 
-const MapView = () => {
+const formatLength = (line: LineString) => {
+  const length = getLength(line, { projection: 'EPSG:4326' });
+  let output;
+  if (length > 100) {
+    output = Math.round((length / 1000) * 100) / 100 + ' ' + 'km';
+  } else {
+    output = Math.round(length * 100) / 100 + ' ' + 'm';
+  }
+  return output;
+};
 
+const formatArea = (polygon: Polygon) => {
+  const area = getArea(polygon, { projection: 'EPSG:4326' });
+  let output;
+  if (area > 10000) {
+    output = Math.round((area / 1000000) * 100) / 100 + ' ' + 'km<sup>2</sup>';
+  } else {
+    output = Math.round(area * 100) / 100 + ' ' + 'm<sup>2</sup>';
+  }
+  return output;
+};
+
+const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, isMaximized }: MapViewProps) => {
   const mapRef = useRef<HTMLDivElement>(null);
-
   const mapInstanceRef = useRef<Map | null>(null);
-
-  // FIX: Explicitly type the ref to avoid the 'BaseLayer' missing property error
-
   const layersRef = useRef<Record<string, TileLayer<TileWMS>>>({});
 
- 
+  const drawSourceRef = useRef<VectorSource | null>(null);
+  const drawVectorLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
+  const drawInteractionRef = useRef<Draw | null>(null);
+  const measureTooltipElementRef = useRef<HTMLDivElement | null>(null);
+  const measureTooltipRef = useRef<Overlay | null>(null);
 
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-
-  const [openLegendKey, setOpenLegendKey] = useState<string | null>(null);
-
-  const [visibleLayers, setVisibleLayers] = useState<LayerVisibility>({
-
-    water: true, building: true, building_summary: true, roads: true, rail: true, bus: true, fire: true,
-
-  });
-
-
+  const [featureInfo, setFeatureInfo] = useState<{ properties: any, coordinate: number[] } | null>(null);
 
   useEffect(() => {
-
     if (!mapRef.current || mapInstanceRef.current) return;
-
     useGeographic();
 
-
-
-    // FIX: Map the layers correctly with the right types
-
     const wmsLayers: Record<string, TileLayer<TileWMS>> = {};
-
     (Object.keys(layerMapping) as Array<keyof LayerVisibility>).forEach((key) => {
-
       wmsLayers[key] = new TileLayer({
-
         source: new TileWMS({
-
           url: geoServerUrl,
-
           params: { 'LAYERS': layerMapping[key], 'TILED': true, 'TRANSPARENT': true },
-
         }),
-
         visible: visibleLayers[key],
-
       });
-
     });
-
-
 
     layersRef.current = wmsLayers;
 
-
-
-    const map = new Map({
-
-      target: mapRef.current,
-
-      layers: [new TileLayer({ source: new OSM() }), ...Object.values(wmsLayers)],
-
-      view: new View({ center: [72.966, 19.197], zoom: 16 }),
-
+    drawSourceRef.current = new VectorSource();
+    drawVectorLayerRef.current = new VectorLayer({
+      source: drawSourceRef.current,
+      style: new Style({
+        fill: new Fill({
+          color: 'rgba(255, 255, 255, 0.2)',
+        }),
+        stroke: new Stroke({
+          color: '#ffcc33',
+          width: 2,
+        }),
+        image: new CircleStyle({
+          radius: 7,
+          fill: new Fill({
+            color: '#ffcc33',
+          }),
+        }),
+      }),
     });
 
-
+    const map = new Map({
+      target: mapRef.current,
+      layers: [new TileLayer({ source: new OSM() }), ...Object.values(wmsLayers), drawVectorLayerRef.current],
+      view: new View({ center: [72.966, 19.197], zoom: 16 }),
+    });
 
     mapInstanceRef.current = map;
-
-    return () => map.setTarget(undefined);
-
+    return () => {
+      map.setTarget(undefined);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    (Object.keys(visibleLayers) as Array<keyof LayerVisibility>).forEach((key) => {
+      if (layersRef.current[key]) {
+        layersRef.current[key].setVisible(visibleLayers[key]);
+      }
+    });
+  }, [visibleLayers]);
 
+  // Handle Tool Changes (Draw Interactions)
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
 
-  const toggleLayer = (key: keyof LayerVisibility) => {
+    // Remove existing interaction
+    if (drawInteractionRef.current) {
+      map.removeInteraction(drawInteractionRef.current);
+      drawInteractionRef.current = null;
+    }
 
-    const newState = !visibleLayers[key];
+    // Set cursor style
+    if (mapRef.current) {
+      mapRef.current.style.cursor = activeTool !== 'cursor' ? 'crosshair' : 'default';
+    }
 
-    setVisibleLayers(prev => ({ ...prev, [key]: newState }));
+    if (activeTool === 'distance' || activeTool === 'area') {
+      const type = activeTool === 'distance' ? 'LineString' : 'Polygon';
 
-    if (layersRef.current[key]) layersRef.current[key].setVisible(newState);
+      const draw = new Draw({
+        source: drawSourceRef.current!,
+        type: type as any,
+        style: new Style({
+          fill: new Fill({ color: 'rgba(255, 255, 255, 0.2)' }),
+          stroke: new Stroke({ color: 'rgba(0, 0, 0, 0.5)', lineDash: [10, 10], width: 2 }),
+          image: new CircleStyle({ radius: 5, stroke: new Stroke({ color: 'rgba(0, 0, 0, 0.7)' }), fill: new Fill({ color: 'rgba(255, 255, 255, 0.2)' }) }),
+        }),
+      });
 
-  };
+      map.addInteraction(draw);
+      drawInteractionRef.current = draw;
 
+      let listener: any;
+      let sketch: any;
 
+      const createMeasureTooltip = () => {
+        if (measureTooltipElementRef.current) {
+          measureTooltipElementRef.current.parentNode?.removeChild(measureTooltipElementRef.current);
+        }
+        measureTooltipElementRef.current = document.createElement('div');
+        measureTooltipElementRef.current.className = 'ol-tooltip ol-tooltip-measure bg-black/80 text-white text-xs px-2 py-1 rounded shadow-lg whitespace-nowrap';
+        measureTooltipRef.current = new Overlay({
+          element: measureTooltipElementRef.current,
+          offset: [0, -15],
+          positioning: 'bottom-center',
+          stopEvent: false,
+          insertFirst: false,
+        });
+        map.addOverlay(measureTooltipRef.current);
+      };
+
+      draw.on('drawstart', (evt: any) => {
+        sketch = evt.feature;
+        let tooltipCoord = evt.coordinate;
+        createMeasureTooltip();
+
+        listener = sketch.getGeometry().on('change', (e: any) => {
+          const geom = e.target;
+          let output;
+          if (geom instanceof Polygon) {
+            output = formatArea(geom);
+            tooltipCoord = geom.getInteriorPoint().getCoordinates();
+          } else if (geom instanceof LineString) {
+            output = formatLength(geom);
+            tooltipCoord = geom.getLastCoordinate();
+          }
+          if (measureTooltipElementRef.current) {
+            measureTooltipElementRef.current.innerHTML = output || '';
+          }
+          measureTooltipRef.current?.setPosition(tooltipCoord);
+        });
+      });
+
+      draw.on('drawend', () => {
+        if (measureTooltipElementRef.current) {
+          measureTooltipElementRef.current.className = 'ol-tooltip ol-tooltip-static bg-blue-600 text-white text-xs px-2 py-1 rounded shadow-lg whitespace-nowrap';
+        }
+        measureTooltipRef.current?.setOffset([0, -7]);
+        sketch = null;
+        measureTooltipElementRef.current = null;
+        createMeasureTooltip();
+        unByKey(listener);
+      });
+    }
+
+    return () => {
+      if (drawInteractionRef.current && map) {
+        map.removeInteraction(drawInteractionRef.current);
+      }
+    };
+  }, [activeTool]);
+
+  // Handle GetFeatureInfo Clicks
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    const handleMapClick = async (evt: any) => {
+      setFeatureInfo(null); // Clear previous
+
+      if (activeTool !== 'cursor') return; // Don't query if measuring
+
+      const viewResolution = map.getView().getResolution();
+      const viewProjection = map.getView().getProjection();
+
+      // Iterate through keys backwards to get top-most visible layer
+      const keys = Object.keys(layerMapping).reverse() as Array<keyof LayerVisibility>;
+
+      for (const key of keys) {
+        if (visibleLayers[key]) {
+          const layer = layersRef.current[key];
+          if (!layer) continue;
+
+          const source = layer.getSource();
+          if (!source) continue;
+
+          const url = source.getFeatureInfoUrl(
+            evt.coordinate,
+            viewResolution!,
+            viewProjection,
+            { 'INFO_FORMAT': 'application/json' }
+          );
+
+          if (url) {
+            try {
+              const response = await fetch(url);
+              const data = await response.json();
+              if (data && data.features && data.features.length > 0) {
+                setFeatureInfo({
+                  properties: data.features[0].properties,
+                  coordinate: evt.coordinate
+                });
+                break; // Stop after finding the first feature
+              }
+            } catch (error) {
+              console.error("Error fetching feature info:", error);
+            }
+          }
+        }
+      }
+    };
+
+    map.on('singleclick', handleMapClick);
+
+    return () => {
+      map.un('singleclick', handleMapClick);
+    };
+  }, [activeTool, visibleLayers]);
 
   return (
+    <div className="relative w-full h-full bg-slate-950">
 
-    <div className="relative w-full h-screen bg-slate-950">
-
-      {/* SIDEBAR UI FIX: Wider container and better positioning for toggles */}
-
-      <div className={`absolute top-4 right-4 z-20 transition-all duration-300 flex items-start gap-3 ${isSidebarOpen ? 'translate-x-0' : 'translate-x-[330px]'}`}>
-
-        <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 bg-slate-900 border border-white/10 rounded-full shadow-xl text-white mt-2">
-
-          {isSidebarOpen ? <ChevronRight size={20} /> : <ChevronLeft size={20} />}
-
+      {/* Tool Selection Bar */}
+      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 p-1 bg-slate-900/90 backdrop-blur border border-white/10 rounded-xl shadow-2xl">
+        <button
+          onClick={() => onToolChange?.('cursor')}
+          className={`p-2 rounded-lg transition-colors flex items-center gap-2 ${activeTool === 'cursor' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
+          title="Normal Cursor"
+        >
+          <CursorIcon size={18} />
+          {isMaximized && <span className="text-xs font-semibold pr-1">Cursor</span>}
         </button>
-
-
-
-        <div className="w-80 bg-slate-900 border border-white/10 rounded-2xl shadow-2xl p-5">
-
-          <div className="flex items-center gap-3 mb-6 pb-3 border-b border-white/5">
-
-            <Layers className="text-blue-400" size={20} />
-
-            <h3 className="font-bold text-white text-lg">Control Panel</h3>
-
+        <button
+          onClick={() => onToolChange?.('distance')}
+          className={`p-2 rounded-lg transition-colors flex items-center gap-2 ${activeTool === 'distance' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
+          title="Measure Distance"
+        >
+          <RulerIcon size={18} />
+          {isMaximized && <span className="text-xs font-semibold pr-1">Distance</span>}
+        </button>
+        <button
+          onClick={() => onToolChange?.('area')}
+          className={`p-2 rounded-lg transition-colors flex items-center gap-2 ${activeTool === 'area' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
+          title="Measure Area"
+        >
+          <SquareIcon size={18} />
+          {isMaximized && <span className="text-xs font-semibold pr-1">Area</span>}
+        </button>
+        {/* Clear Measurements */}
+        {(activeTool === 'distance' || activeTool === 'area') && (
+          <div className="pl-2 ml-1 border-l border-white/10">
+            <button
+              onClick={() => {
+                drawSourceRef.current?.clear();
+                // Clear tooltips
+                mapInstanceRef.current?.getOverlays().clear();
+              }}
+              className="px-3 py-2 text-xs font-semibold text-rose-400 hover:text-rose-300 hover:bg-rose-400/10 rounded-lg transition-colors"
+            >
+              Clear
+            </button>
           </div>
-
-
-
-          <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-2">
-
-            {(Object.keys(visibleLayers) as Array<keyof LayerVisibility>).map((key) => (
-
-              <div key={key} className="bg-white/5 rounded-xl border border-white/5 transition-all">
-
-                <div className="flex items-center justify-between p-3">
-
-                  <span className="text-xs font-bold text-slate-200 capitalize truncate pr-2">{key.replace('_', ' ')}</span>
-
-                 
-
-                  <div className="flex items-center gap-4">
-
-                    {/* Legend Action */}
-
-                    <button
-
-                      onClick={() => setOpenLegendKey(openLegendKey === key ? null : key)}
-
-                      className={`p-1.5 rounded-lg ${openLegendKey === key ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500'}`}
-
-                    >
-
-                      <Info size={16} />
-
-                    </button>
-
-                    {/* Switch Toggle */}
-
-                    <button
-
-                      onClick={() => toggleLayer(key)}
-
-                      className={`relative w-10 h-5 rounded-full transition-all ${visibleLayers[key] ? 'bg-blue-600' : 'bg-slate-700'}`}
-
-                    >
-
-                      <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${visibleLayers[key] ? 'left-6' : 'left-1'}`} />
-
-                    </button>
-
-                  </div>
-
-                </div>
-
-
-
-                {/* LEGEND DISPLAY: Pulls the correct style graphic from GeoServer */}
-
-                {openLegendKey === key && (
-
-                  <div className="px-3 pb-4 pt-2 border-t border-white/5 bg-black/20">
-
-                    <img
-
-                      src={`${geoServerUrl}?REQUEST=GetLegendGraphic&VERSION=1.0.0&FORMAT=image/png&LAYER=${layerMapping[key]}&LEGEND_OPTIONS=fontColor:0xFFFFFF;fontSize:10&TRANSPARENT=true`}
-
-                      alt="legend"
-
-                      className="max-w-full opacity-90"
-
-                      onError={(e) => (e.currentTarget.style.display = 'none')}
-
-                    />
-
-                  </div>
-
-                )}
-
-              </div>
-
-            ))}
-
-          </div>
-
-        </div>
-
+        )}
       </div>
-
-
 
       <div ref={mapRef} className="w-full h-full" />
 
+      {/* Feature Info Popup */}
+      {featureInfo && (
+        <div
+          className="absolute z-30 bg-white dark:bg-slate-900 border border-border shadow-xl rounded-xl p-4 max-w-sm"
+          style={{
+            // Rough positioning translation from map coordinates to screen coordinates
+            // We ideally should use an ol/Overlay for this, but doing it simple via React for now
+            // Because we need map.getPixelFromCoordinate. 
+          }}
+        >
+          {/* Fallback to absolutely positioning inside map div */}
+          {(() => {
+            const map = mapInstanceRef.current;
+            if (!map) return null;
+            const pixel = map.getPixelFromCoordinate(featureInfo.coordinate);
+            if (!pixel) return null;
+
+            return (
+              <div
+                className="fixed bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl rounded-xl p-4 min-w-[200px]"
+                style={{ left: pixel[0] + 15, top: pixel[1] + 15 }}
+              >
+                <div className="flex justify-between items-center mb-2 pb-2 border-b border-slate-100 dark:border-slate-800">
+                  <h4 className="font-semibold text-sm">Feature Details</h4>
+                  <button onClick={() => setFeatureInfo(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                </div>
+                <div className="space-y-1 text-xs">
+                  {Object.entries(featureInfo.properties).map(([key, value]) => {
+                    // Filter out useless internal geoserver keys
+                    if (key === 'bbox' || key.startsWith('geom')) return null;
+                    return (
+                      <div key={key} className="flex justify-between gap-4">
+                        <span className="text-slate-500 font-medium capitalize">{key.replace(/_/g, ' ')}</span>
+                        <span className="font-mono text-slate-800 dark:text-slate-200 text-right">
+                          {typeof value === 'number' ? (value > 1000 ? value.toFixed(2) : value.toFixed(4)) : String(value)}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })()}
+        </div>
+      )}
     </div>
-
   );
-
 };
-
-
 
 export default MapView;

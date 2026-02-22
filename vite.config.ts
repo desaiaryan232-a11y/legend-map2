@@ -6,10 +6,9 @@ import { componentTagger } from "lovable-tagger";
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
   server: {
-    host: "localhost",
-    // Changed port to 8084 because your GeoServer is using 8081.
-    // This matches the "localhost:8084/dashboard" seen in your browser screenshots.
-    port: 8084, 
+    host: true, // Listen on all network interfaces to resolve IPv4 vs IPv6 issues
+    // Changed port to 8004 as requested
+    port: 8004,
     hmr: {
       overlay: false,
     },
