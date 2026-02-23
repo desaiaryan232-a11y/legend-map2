@@ -3,7 +3,7 @@ import Map from 'ol/Map';
 import View from 'ol/View';
 import TileLayer from 'ol/layer/Tile';
 import TileWMS from 'ol/source/TileWMS';
-import { useGeographic } from 'ol/proj';
+import { useGeographic, transform } from 'ol/proj';
 import OSM from 'ol/source/OSM';
 import VectorLayer from 'ol/layer/Vector';
 import VectorSource from 'ol/source/Vector';
@@ -16,7 +16,7 @@ import { Style, Fill, Stroke, Circle as CircleStyle } from 'ol/style';
 import { MousePointer2 as CursorIcon, Ruler as RulerIcon, Square as SquareIcon, ZoomIn, Plus, Minus } from 'lucide-react';
 import 'ol/ol.css';
 
-export const geoServerUrl = "http://localhost:8081/geoserver/wms";
+export const geoServerUrl = "/geoserver/wms";
 
 export interface LayerVisibility {
   water: boolean;
@@ -40,10 +40,17 @@ export const layerMapping: Record<keyof LayerVisibility, string> = {
 
 export type ActiveTool = 'cursor' | 'distance' | 'area';
 
+export interface SelectedFeatureData {
+  id: string;
+  properties: Record<string, any>;
+  layerKey: string;
+}
+
 interface MapViewProps {
   visibleLayers: LayerVisibility;
   activeTool?: ActiveTool;
   onToolChange?: (tool: ActiveTool) => void;
+  onFeatureSelect?: (feature: SelectedFeatureData | null) => void;
 }
 
 const formatLength = (line: LineString) => {
@@ -68,7 +75,7 @@ const formatArea = (polygon: Polygon) => {
   return output;
 };
 
-const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange }: MapViewProps) => {
+const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, onFeatureSelect }: MapViewProps) => {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<Map | null>(null);
   const layersRef = useRef<Record<string, TileLayer<TileWMS>>>({});
@@ -81,8 +88,6 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange }: MapView
   const measureTooltipElementRef = useRef<HTMLDivElement | null>(null);
   const measureTooltipRef = useRef<Overlay | null>(null);
 
-  const [featureInfo, setFeatureInfo] = useState<{ properties: any, coordinate: number[] } | null>(null);
-
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return;
     useGeographic();
@@ -92,7 +97,7 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange }: MapView
       wmsLayers[key] = new TileLayer({
         source: new TileWMS({
           url: geoServerUrl,
-          params: { 'LAYERS': layerMapping[key], 'TILED': true, 'TRANSPARENT': true },
+          params: { 'LAYERS': layerMapping[key], 'TILED': true, 'TRANSPARENT': true, 'VERSION': '1.1.1' },
         }),
         visible: visibleLayers[key],
       });
@@ -239,15 +244,22 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange }: MapView
     if (!map) return;
 
     const handleMapClick = async (evt: any) => {
-      setFeatureInfo(null); // Clear previous
-
       if (activeTool !== 'cursor') return; // Don't query if measuring
+
+      if (onFeatureSelect) onFeatureSelect(null); // Clear previous in parent
 
       const viewResolution = map.getView().getResolution();
       const viewProjection = map.getView().getProjection();
 
+      const internalCoordinate = transform(evt.coordinate, 'EPSG:4326', viewProjection);
+
+      console.log("Map clicked at coordinate:", evt.coordinate);
+      console.log("Internal Coordinate for WMS bounds:", internalCoordinate);
+
       // Iterate through keys backwards to get top-most visible layer
       const keys = Object.keys(layerMapping).reverse() as Array<keyof LayerVisibility>;
+
+      let featureFound = false;
 
       for (const key of keys) {
         if (visibleLayers[key]) {
@@ -258,28 +270,52 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange }: MapView
           if (!source) continue;
 
           const url = source.getFeatureInfoUrl(
-            evt.coordinate,
+            internalCoordinate,
             viewResolution!,
             viewProjection,
-            { 'INFO_FORMAT': 'application/json' }
+            { 'INFO_FORMAT': 'application/json', 'BUFFER': 30, 'FEATURE_COUNT': 5 }
           );
 
           if (url) {
+            console.log(`Requesting layer ${key}:`, url);
             try {
               const response = await fetch(url);
+              if (!response.ok) {
+                const text = await response.text();
+                console.error(`GeoServer Error for ${key}:`, text);
+                continue;
+              }
+
+              const contentType = response.headers.get("content-type");
+              if (contentType && contentType.includes("text/html")) {
+                alert("The map proxy isn't working yet! You must restart your terminal with 'npm run dev' to apply the Geoserver proxy settings.");
+                return;
+              }
+
               const data = await response.json();
+              console.log(`GeoServer Response for ${key}:`, data);
+
               if (data && data.features && data.features.length > 0) {
-                setFeatureInfo({
-                  properties: data.features[0].properties,
-                  coordinate: evt.coordinate
-                });
+                console.log("Feature found!", data.features[0]);
+                if (onFeatureSelect) {
+                  onFeatureSelect({
+                    id: data.features[0].id || `${layerMapping[key]}-${Date.now()}`,
+                    properties: data.features[0].properties,
+                    layerKey: key
+                  });
+                }
+                featureFound = true;
                 break; // Stop after finding the first feature
               }
             } catch (error) {
-              console.error("Error fetching feature info:", error);
+              console.error(`Error fetching feature info JSON for ${key} (check browser console / GeoServer logs):`, error);
             }
           }
         }
+      }
+
+      if (!featureFound) {
+        console.warn("No features were returned by Geoserver at this coordinate for any visible layer.");
       }
     };
 
@@ -371,52 +407,6 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange }: MapView
       </div>
 
       <div ref={mapRef} className="w-full h-full" />
-
-      {/* Feature Info Popup */}
-      {featureInfo && (
-        <div
-          className="absolute z-30 bg-white dark:bg-slate-900 border border-border shadow-xl rounded-xl p-4 max-w-sm"
-          style={{
-            // Rough positioning translation from map coordinates to screen coordinates
-            // We ideally should use an ol/Overlay for this, but doing it simple via React for now
-            // Because we need map.getPixelFromCoordinate. 
-          }}
-        >
-          {/* Fallback to absolutely positioning inside map div */}
-          {(() => {
-            const map = mapInstanceRef.current;
-            if (!map) return null;
-            const pixel = map.getPixelFromCoordinate(featureInfo.coordinate);
-            if (!pixel) return null;
-
-            return (
-              <div
-                className="fixed bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl rounded-xl p-4 min-w-[200px]"
-                style={{ left: pixel[0] + 15, top: pixel[1] + 15 }}
-              >
-                <div className="flex justify-between items-center mb-2 pb-2 border-b border-slate-100 dark:border-slate-800">
-                  <h4 className="font-semibold text-sm">Feature Details</h4>
-                  <button onClick={() => setFeatureInfo(null)} className="text-slate-400 hover:text-slate-600">×</button>
-                </div>
-                <div className="space-y-1 text-xs">
-                  {Object.entries(featureInfo.properties).map(([key, value]) => {
-                    // Filter out useless internal geoserver keys
-                    if (key === 'bbox' || key.startsWith('geom')) return null;
-                    return (
-                      <div key={key} className="flex justify-between gap-4">
-                        <span className="text-slate-500 font-medium capitalize">{key.replace(/_/g, ' ')}</span>
-                        <span className="font-mono text-slate-800 dark:text-slate-200 text-right">
-                          {typeof value === 'number' ? (value > 1000 ? value.toFixed(2) : value.toFixed(4)) : String(value)}
-                        </span>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )
-          })()}
-        </div>
-      )}
     </div>
   );
 };
