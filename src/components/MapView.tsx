@@ -13,7 +13,7 @@ import { getArea, getLength } from 'ol/sphere';
 import { unByKey } from 'ol/Observable';
 import { LineString, Polygon } from 'ol/geom';
 import { Style, Fill, Stroke, Circle as CircleStyle } from 'ol/style';
-import { MousePointer2 as CursorIcon, Ruler as RulerIcon, Square as SquareIcon } from 'lucide-react';
+import { MousePointer2 as CursorIcon, Ruler as RulerIcon, Square as SquareIcon, ZoomIn, Plus, Minus } from 'lucide-react';
 import 'ol/ol.css';
 
 export const geoServerUrl = "http://localhost:8081/geoserver/wms";
@@ -44,7 +44,6 @@ interface MapViewProps {
   visibleLayers: LayerVisibility;
   activeTool?: ActiveTool;
   onToolChange?: (tool: ActiveTool) => void;
-  isMaximized?: boolean;
 }
 
 const formatLength = (line: LineString) => {
@@ -69,10 +68,12 @@ const formatArea = (polygon: Polygon) => {
   return output;
 };
 
-const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, isMaximized }: MapViewProps) => {
+const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange }: MapViewProps) => {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<Map | null>(null);
   const layersRef = useRef<Record<string, TileLayer<TileWMS>>>({});
+
+  const [isZoomOpen, setIsZoomOpen] = useState(false);
 
   const drawSourceRef = useRef<VectorSource | null>(null);
   const drawVectorLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
@@ -300,7 +301,6 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, isMaximiz
           title="Normal Cursor"
         >
           <CursorIcon size={18} />
-          {isMaximized && <span className="text-xs font-semibold pr-1">Cursor</span>}
         </button>
         <button
           onClick={() => onToolChange?.('distance')}
@@ -308,7 +308,6 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, isMaximiz
           title="Measure Distance"
         >
           <RulerIcon size={18} />
-          {isMaximized && <span className="text-xs font-semibold pr-1">Distance</span>}
         </button>
         <button
           onClick={() => onToolChange?.('area')}
@@ -316,8 +315,44 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, isMaximiz
           title="Measure Area"
         >
           <SquareIcon size={18} />
-          {isMaximized && <span className="text-xs font-semibold pr-1">Area</span>}
         </button>
+
+        {/* Zoom Controls */}
+        <div className="pl-2 ml-1 border-l border-white/10 flex items-center gap-1">
+          <button
+            onClick={() => setIsZoomOpen(!isZoomOpen)}
+            className={`p-2 rounded-lg transition-colors flex items-center gap-2 ${isZoomOpen ? 'bg-white/20 text-white' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
+            title="Zoom Tools"
+          >
+            <ZoomIn size={18} />
+          </button>
+
+          {isZoomOpen && (
+            <div className="flex items-center gap-1 animate-in fade-in slide-in-from-left-2 duration-200">
+              <button
+                onClick={() => {
+                  const view = mapInstanceRef.current?.getView();
+                  if (view) view.setZoom((view.getZoom() || 16) + 1);
+                }}
+                className="p-2 rounded-lg transition-colors flex items-center gap-2 text-slate-400 hover:text-white hover:bg-white/10 bg-black/20"
+                title="Zoom In"
+              >
+                <Plus size={16} />
+              </button>
+              <button
+                onClick={() => {
+                  const view = mapInstanceRef.current?.getView();
+                  if (view) view.setZoom((view.getZoom() || 16) - 1);
+                }}
+                className="p-2 rounded-lg transition-colors flex items-center gap-2 text-slate-400 hover:text-white hover:bg-white/10 bg-black/20"
+                title="Zoom Out"
+              >
+                <Minus size={16} />
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* Clear Measurements */}
         {(activeTool === 'distance' || activeTool === 'area') && (
           <div className="pl-2 ml-1 border-l border-white/10">

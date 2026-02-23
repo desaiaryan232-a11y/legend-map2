@@ -7,15 +7,15 @@ import { componentTagger } from "lovable-tagger";
 export default defineConfig(({ mode }) => ({
   server: {
     host: true, // Listen on all network interfaces to resolve IPv4 vs IPv6 issues
-    // Changed port to 8004 as requested
-    port: 8004,
+    // Changed port to 8007 as requested
+    port: 8008,
     hmr: {
-      overlay: false,
+      overlay: true,
     },
   },
   plugins: [
     react(),
-    mode === "development" && componentTagger(),
+    // mode === "development" && componentTagger(),
   ].filter(Boolean),
   resolve: {
     alias: {

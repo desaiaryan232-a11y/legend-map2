@@ -10,9 +10,7 @@ import {
   Navigation,
   LogOut,
   Map,
-  Info,
-  Maximize2,
-  Minimize2
+  Info
 } from 'lucide-react';
 
 const Dashboard = () => {
@@ -174,27 +172,9 @@ const Dashboard = () => {
           <div className={`map-container h-full relative overflow-hidden ${isMapMaximized ? 'rounded-none' : 'rounded-2xl'}`}>
             <MapView
               visibleLayers={visibleLayers}
-              isMaximized={isMapMaximized}
               activeTool={activeTool}
               onToolChange={setActiveTool}
             />
-
-            {/* Map Controls Overlay */}
-            <div className="absolute top-4 right-4 z-10 flex flex-col gap-2">
-              <Button
-                variant="secondary"
-                size="icon"
-                onClick={() => setIsMapMaximized(!isMapMaximized)}
-                className="bg-background/80 backdrop-blur-sm border border-border/50 hover:bg-background/90 shadow-sm"
-                title={isMapMaximized ? "Minimize Map" : "Maximize Map"}
-              >
-                {isMapMaximized ? (
-                  <Minimize2 className="w-4 h-4 text-foreground" />
-                ) : (
-                  <Maximize2 className="w-4 h-4 text-foreground" />
-                )}
-              </Button>
-            </div>
 
             {/* Corner decoration */}
             <div className="absolute top-4 left-4 z-10 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-background/80 backdrop-blur-sm border border-border/50 text-xs text-muted-foreground">
