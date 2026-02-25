@@ -12,6 +12,7 @@ import Overlay from 'ol/Overlay';
 import { getArea, getLength } from 'ol/sphere';
 import { unByKey } from 'ol/Observable';
 import { LineString, Polygon } from 'ol/geom';
+import GeoJSON from 'ol/format/GeoJSON';
 import { Style, Fill, Stroke, Circle as CircleStyle } from 'ol/style';
 import { MousePointer2 as CursorIcon, Ruler as RulerIcon, Square as SquareIcon, ZoomIn, Plus, Minus } from 'lucide-react';
 import 'ol/ol.css';
@@ -44,6 +45,7 @@ export interface SelectedFeatureData {
   id: string;
   properties: Record<string, any>;
   layerKey: string;
+  rawFeature?: any;
 }
 
 interface MapViewProps {
@@ -51,6 +53,7 @@ interface MapViewProps {
   activeTool?: ActiveTool;
   onToolChange?: (tool: ActiveTool) => void;
   onFeatureSelect?: (feature: SelectedFeatureData | null) => void;
+  selectedFeature?: SelectedFeatureData | null;
 }
 
 const formatLength = (line: LineString) => {
@@ -75,7 +78,7 @@ const formatArea = (polygon: Polygon) => {
   return output;
 };
 
-const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, onFeatureSelect }: MapViewProps) => {
+const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, onFeatureSelect, selectedFeature }: MapViewProps) => {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<Map | null>(null);
   const layersRef = useRef<Record<string, TileLayer<TileWMS>>>({});
@@ -87,6 +90,9 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, onFeature
   const drawInteractionRef = useRef<Draw | null>(null);
   const measureTooltipElementRef = useRef<HTMLDivElement | null>(null);
   const measureTooltipRef = useRef<Overlay | null>(null);
+  const highlightSourceRef = useRef<VectorSource | null>(null);
+  const highlightLayerRef = useRef<VectorLayer<VectorSource> | null>(null);
+  const highlightWMSLayerRef = useRef<TileLayer<TileWMS> | null>(null);
 
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return;
@@ -125,9 +131,36 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, onFeature
       }),
     });
 
+    highlightSourceRef.current = new VectorSource();
+    highlightLayerRef.current = new VectorLayer({
+      source: highlightSourceRef.current,
+      // Stroke-only outline so the WMS original colours show through
+      style: new Style({
+        stroke: new Stroke({
+          color: 'rgba(251, 191, 36, 1)',
+          width: 3,
+        }),
+        image: new CircleStyle({
+          radius: 9,
+          fill: new Fill({ color: 'rgba(251, 191, 36, 0.9)' }),
+          stroke: new Stroke({ color: '#fff', width: 2 })
+        }),
+      }),
+    });
+
+    // WMS highlight layer (hidden until a feature is selected)
+    highlightWMSLayerRef.current = new TileLayer({
+      source: new TileWMS({
+        url: geoServerUrl,
+        params: { 'LAYERS': '', 'TILED': true, 'TRANSPARENT': true, 'VERSION': '1.1.1' },
+      }),
+      visible: false,
+      zIndex: 100,
+    });
+
     const map = new Map({
       target: mapRef.current,
-      layers: [new TileLayer({ source: new OSM() }), ...Object.values(wmsLayers), drawVectorLayerRef.current],
+      layers: [new TileLayer({ source: new OSM() }), ...Object.values(wmsLayers), drawVectorLayerRef.current, highlightWMSLayerRef.current, highlightLayerRef.current],
       view: new View({ center: [72.966, 19.197], zoom: 16 }),
     });
 
@@ -141,10 +174,50 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, onFeature
   useEffect(() => {
     (Object.keys(visibleLayers) as Array<keyof LayerVisibility>).forEach((key) => {
       if (layersRef.current[key]) {
-        layersRef.current[key].setVisible(visibleLayers[key]);
+        const layer = layersRef.current[key];
+        layer.setVisible(visibleLayers[key]);
+        // Dim ALL WMS layers when a feature is selected; the highlight
+        // vector overlay on top will make only the clicked item stand out.
+        layer.setOpacity(selectedFeature ? 0.15 : 1);
       }
     });
-  }, [visibleLayers]);
+
+    if (highlightSourceRef.current) {
+      highlightSourceRef.current.clear();
+    }
+
+    if (highlightWMSLayerRef.current) {
+      if (selectedFeature && selectedFeature.rawFeature) {
+        // Show only the clicked feature using its GeoServer ID via FEATUREID filter
+        const featureId = selectedFeature.rawFeature.id;
+        const wmsLayerName = layerMapping[selectedFeature.layerKey as keyof LayerVisibility];
+        const source = highlightWMSLayerRef.current.getSource();
+        if (source && featureId && wmsLayerName) {
+          source.updateParams({
+            'LAYERS': wmsLayerName,
+            'FEATUREID': featureId,
+          });
+          source.refresh();
+        }
+        highlightWMSLayerRef.current.setVisible(true);
+
+        // Also draw outline via vector overlay
+        if (selectedFeature.rawFeature && highlightSourceRef.current) {
+          try {
+            const feature = new GeoJSON().readFeature(selectedFeature.rawFeature, {
+              dataProjection: 'EPSG:4326',
+              featureProjection: mapInstanceRef.current?.getView().getProjection() || 'EPSG:3857',
+            });
+            highlightSourceRef.current.addFeature(feature as any);
+          } catch (e) {
+            console.error('Failed to parse highlight geometry:', e);
+          }
+        }
+      } else {
+        highlightWMSLayerRef.current.setVisible(false);
+      }
+    }
+  }, [visibleLayers, selectedFeature]);
 
   // Handle Tool Changes (Draw Interactions)
   useEffect(() => {
@@ -301,7 +374,8 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, onFeature
                   onFeatureSelect({
                     id: data.features[0].id || `${layerMapping[key]}-${Date.now()}`,
                     properties: data.features[0].properties,
-                    layerKey: key
+                    layerKey: key,
+                    rawFeature: data.features[0]
                   });
                 }
                 featureFound = true;
@@ -329,61 +403,61 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, onFeature
   return (
     <div className="relative w-full h-full bg-slate-950">
 
-      {/* Tool Selection Bar */}
-      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 p-1 bg-slate-900/90 backdrop-blur border border-white/10 rounded-xl shadow-2xl">
+      {/* Tool Selection Bar (Glassmorphic, Bottom) */}
+      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1.5 p-2 bg-black/40 backdrop-blur-xl border border-white/10 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] transition-all duration-500 ease-out hover:bg-black/50 hover:border-white/20">
         <button
           onClick={() => onToolChange?.('cursor')}
-          className={`p-2 rounded-lg transition-colors flex items-center gap-2 ${activeTool === 'cursor' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
+          className={`p-2.5 rounded-xl transition-all duration-300 flex items-center gap-2 ${activeTool === 'cursor' ? 'bg-blue-500 text-white shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
           title="Normal Cursor"
         >
-          <CursorIcon size={18} />
+          <CursorIcon size={20} />
         </button>
         <button
           onClick={() => onToolChange?.('distance')}
-          className={`p-2 rounded-lg transition-colors flex items-center gap-2 ${activeTool === 'distance' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
+          className={`p-2.5 rounded-xl transition-all duration-300 flex items-center gap-2 ${activeTool === 'distance' ? 'bg-blue-500 text-white shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
           title="Measure Distance"
         >
-          <RulerIcon size={18} />
+          <RulerIcon size={20} />
         </button>
         <button
           onClick={() => onToolChange?.('area')}
-          className={`p-2 rounded-lg transition-colors flex items-center gap-2 ${activeTool === 'area' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
+          className={`p-2.5 rounded-xl transition-all duration-300 flex items-center gap-2 ${activeTool === 'area' ? 'bg-blue-500 text-white shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
           title="Measure Area"
         >
-          <SquareIcon size={18} />
+          <SquareIcon size={20} />
         </button>
 
         {/* Zoom Controls */}
-        <div className="pl-2 ml-1 border-l border-white/10 flex items-center gap-1">
+        <div className="pl-2 ml-1 border-l border-white/10 flex items-center gap-1.5">
           <button
             onClick={() => setIsZoomOpen(!isZoomOpen)}
-            className={`p-2 rounded-lg transition-colors flex items-center gap-2 ${isZoomOpen ? 'bg-white/20 text-white' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
+            className={`p-2.5 rounded-xl transition-all duration-300 flex items-center gap-2 ${isZoomOpen ? 'bg-white/20 text-white' : 'text-slate-400 hover:text-white hover:bg-white/10'}`}
             title="Zoom Tools"
           >
-            <ZoomIn size={18} />
+            <ZoomIn size={20} />
           </button>
 
           {isZoomOpen && (
-            <div className="flex items-center gap-1 animate-in fade-in slide-in-from-left-2 duration-200">
+            <div className="flex items-center gap-1.5 animate-in fade-in slide-in-from-left-2 duration-300">
               <button
                 onClick={() => {
                   const view = mapInstanceRef.current?.getView();
                   if (view) view.setZoom((view.getZoom() || 16) + 1);
                 }}
-                className="p-2 rounded-lg transition-colors flex items-center gap-2 text-slate-400 hover:text-white hover:bg-white/10 bg-black/20"
+                className="p-2.5 rounded-xl transition-all duration-300 flex items-center gap-2 text-slate-400 hover:text-white hover:bg-white/10 bg-black/20"
                 title="Zoom In"
               >
-                <Plus size={16} />
+                <Plus size={18} />
               </button>
               <button
                 onClick={() => {
                   const view = mapInstanceRef.current?.getView();
                   if (view) view.setZoom((view.getZoom() || 16) - 1);
                 }}
-                className="p-2 rounded-lg transition-colors flex items-center gap-2 text-slate-400 hover:text-white hover:bg-white/10 bg-black/20"
+                className="p-2.5 rounded-xl transition-all duration-300 flex items-center gap-2 text-slate-400 hover:text-white hover:bg-white/10 bg-black/20"
                 title="Zoom Out"
               >
-                <Minus size={16} />
+                <Minus size={18} />
               </button>
             </div>
           )}
@@ -391,14 +465,14 @@ const MapView = ({ visibleLayers, activeTool = 'cursor', onToolChange, onFeature
 
         {/* Clear Measurements */}
         {(activeTool === 'distance' || activeTool === 'area') && (
-          <div className="pl-2 ml-1 border-l border-white/10">
+          <div className="pl-2 ml-1 border-l border-white/10 animate-in fade-in zoom-in-95 duration-300">
             <button
               onClick={() => {
                 drawSourceRef.current?.clear();
                 // Clear tooltips
                 mapInstanceRef.current?.getOverlays().clear();
               }}
-              className="px-3 py-2 text-xs font-semibold text-rose-400 hover:text-rose-300 hover:bg-rose-400/10 rounded-lg transition-colors"
+              className="px-4 py-2 text-sm font-semibold text-rose-400 hover:text-white hover:bg-rose-500 rounded-xl transition-all duration-300 shadow-[0_0_10px_rgba(244,63,94,0)] hover:shadow-[0_0_15px_rgba(244,63,94,0.5)] border border-rose-500/0 hover:border-rose-500/50"
             >
               Clear
             </button>

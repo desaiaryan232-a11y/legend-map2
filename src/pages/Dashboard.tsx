@@ -151,6 +151,7 @@ const Dashboard = () => {
               activeTool={activeTool}
               onToolChange={setActiveTool}
               onFeatureSelect={setSelectedFeature}
+              selectedFeature={selectedFeature}
             />
 
             {/* Corner decoration */}
